@@ -1,5 +1,3 @@
-# agentic_custom_llm.py
-
 import requests
 from crewai import Agent, Task, Crew
 from crewai.llm import LLM
@@ -26,11 +24,12 @@ if not filt:
 
 # sample up to 5 for brevity
 sample = filt[:5]
-#Detect the unique years in your sample
+# Detect the unique years in your sample
 years_present = sorted({ int(r["year"]) for r in sample })
 
-# 2) Turn that into a human-friendly string
+# Turn it into a human-friendly string
 years_str = ", ".join(str(y) for y in years_present)
+
 # ── 2) Custom in-process TinyLlama Chat LLM ──
 class TinyLlamaChatLLM(LLM):
     def __init__(self):
