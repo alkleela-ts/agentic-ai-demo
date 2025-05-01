@@ -1,100 +1,136 @@
 # agentic_custom_llm.py
 
+import requests
 from crewai import Agent, Task, Crew
 from crewai.llm import LLM
 from transformers import pipeline
-import requests
 
-# ── 1) Define a custom in-process LLM by subclassing crewai.llm.LLM ──
-class TinyLlamaLLM(LLM):
+# ── 1) Fetch & filter CDC data once ──
+def fetch_data(limit: int = 50):
+    url = "https://data.cdc.gov/resource/bi63-dtpu.json"
+    resp = requests.get(url)
+    resp.raise_for_status()
+    return resp.json()[:limit]
+
+def sort_and_filter_by_year(records, years):
+    # sort by numeric year
+    sorted_records = sorted(records, key=lambda r: int(r.get("year", 0)))
+    # keep only the target years
+    return [r for r in sorted_records if int(r.get("year", 0)) in years]
+
+# fetch & filter
+raw   = fetch_data(50)
+filt  = sort_and_filter_by_year(raw, years=[2016, 2017])
+if not filt:
+    raise RuntimeError("No records found for 2016–2017.")
+
+# sample up to 5 for brevity
+sample = filt[:5]
+#Detect the unique years in your sample
+years_present = sorted({ int(r["year"]) for r in sample })
+
+# 2) Turn that into a human-friendly string
+years_str = ", ".join(str(y) for y in years_present)
+# ── 2) Custom in-process TinyLlama Chat LLM ──
+class TinyLlamaChatLLM(LLM):
     def __init__(self):
         super().__init__(model="TinyLlama-Chat")
-        # initialize the Hugging Face pipeline once
         self.generator = pipeline(
             "text-generation",
             model="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
             tokenizer="TinyLlama/TinyLlama-1.1B-Chat-v1.0",
-            device_map="auto",      # use MPS on Apple Silicon
-            torch_dtype="auto",     # float16 on MPS
+            device_map="auto",
+            torch_dtype="auto",
             return_full_text=False,
             do_sample=False,
-            max_new_tokens=100,
+            max_new_tokens=150,
         )
 
     def call(self, prompt: str, **kwargs) -> str:
-        # wrap in Q/A format so base model knows to answer
-        qa = f"Q: {prompt}\nA:"
-        gen = self.generator(
-            qa,
-            max_new_tokens=kwargs.get("max_new_tokens", 100)
-        )[0]["generated_text"]
-        # strip off the "A:" prefix
-        return gen.split("A:")[-1].strip()
+        chat = (
+            "<|system|>\n"
+            "You are a data-cleaning and analysis assistant.\n"
+            "<|end|>\n\n"
+            "<|user|>\n"
+            f"{prompt}\n"
+            "<|end|>\n\n"
+            "<|assistant|>\n"
+        )
+        out = self.generator(chat, max_new_tokens=kwargs.get("max_new_tokens",150))[0]["generated_text"]
+        return out.strip()
 
-# ── 2) Helper to fetch CDC flu hospitalization data ──
-def fetch_cdc_data():
-    url = "https://data.cdc.gov/resource/bi63-dtpu.json"
-    resp = requests.get(url)
-    if resp.status_code == 200:
-        return resp.json()[:100]    # limit to first three for brevity
-    raise RuntimeError(f"Failed to fetch CDC data: {resp.status_code}")
+llm = TinyLlamaChatLLM()
 
-# ── 3) Instantiate the LLM ──
-llm = TinyLlamaLLM()
-
-# ── 4) Define Agents ──
+# ── 3) Define Agents ──
 data_fetcher = Agent(
     role="CDC Data Fetcher",
-    goal="Collect and clean the latest CDC flu hospitalization data.",
-    backstory="An expert in public-health data cleaning and formatting.",
+    goal="Clean and standardize the sample vital-stats records (2016–2017).",
+    backstory="Expert in sanitizing public-health mortality datasets.",
     llm=llm
 )
 
 analyzer = Agent(
     role="Health Data Analyst",
-    goal="Analyze cleaned flu data and identify key trends.",
-    backstory="Epidemiologist skilled at spotting patterns in time-series data.",
+    goal="Identify key year-over-year changes in deaths and age-adjusted death rate.",
+    backstory="Epidemiologist skilled at deriving insights from numeric trends.",
     llm=llm
 )
 
 advisor = Agent(
     role="Health Advisor",
-    goal="Provide simple, actionable health advice based on trends.",
-    backstory="A public-health advisor focused on clear recommendations.",
+    goal="Formulate actionable public-health recommendations from those trends.",
+    backstory="Advisor focused on clear, practical health guidance.",
     llm=llm
 )
 
-# ── 5) Define Tasks (with empty expected_output to satisfy schema) ──
-raw = fetch_cdc_data()
-
+# ── 4) Create Tasks, feeding the SAME sample into Task 1 ──
+# TASK 1: Clean & normalize
 task1 = Task(
     description=(
-        f"Here are the first 3 records of CDC flu hospitalization data:\n{raw}\n\n"
-        "Please clean it (format dates, remove nulls) and summarize the key fields."
+         f"Here are 5 sample records for the years: {years_str}.\n{sample}\n\n"
+        "**Please output** a JSON array of objects with these keys:\n"
+        "`year` (int), `cause_name` (str), `state` (str), `deaths` (int), `aadr` (float).\n\n"
+        "Example:\n```json\n"
+        "[{\"year\":2020,\"cause_name\":\"X\",\"state\":\"Y\",\"deaths\":123,\"aadr\":4.5}]\n```"
+
     ),
     agent=data_fetcher,
     expected_output=""
 )
 
+
+# TASK 2: Trend analysis
 task2 = Task(
     description=(
-        "Based on the cleaned data, identify which weeks saw increases "
-        "or decreases in hospitalizations and summarize the trends."
+       "Given the **cleaned JSON** from Task 1, calculate:\n"
+        "1. The year-over-year difference in `deaths` for each cause and state.\n"
+        "2. The year-over-year change in `aadr` for each cause and state.\n\n"
+        "**Please output** a JSON array of objects, each with:\n"
+        "`cause_name`, `state`, `deaths_change` (int), `aadr_change` (float).\n\n"
+        "Example:\n```json\n"
+        "[{\"cause_name\":\"Kidney disease\",\"state\":\"VT\",\"deaths_change\":-1,\"aadr_change\":-0.4}]\n```"
+
     ),
     agent=analyzer,
     expected_output=""
 )
 
+
+# TASK 3: Public-health advice
 task3 = Task(
     description=(
-        "Given the trend analysis, write clear health advice for the public, "
-        "e.g., who should consider extra precautions or vaccination."
+         "Based on the JSON results from Task 2, write **2–3 bullet-point recommendations**\n"
+        "for public-health officials and at-risk patients.\n\n"
+        "**Please output** plain text bullets, e.g.:\n"
+        "- Increase vaccination campaigns in states with rising death rates.\n"
+        "- …"
     ),
     agent=advisor,
     expected_output=""
 )
 
-# ── 6) Create and run the Crew ──
+
+# ── 5) Assemble & run the Crew ──
 crew = Crew(
     agents=[data_fetcher, analyzer, advisor],
     tasks=[task1, task2, task3],
@@ -102,6 +138,6 @@ crew = Crew(
 )
 
 if __name__ == "__main__":
-    print("\n Starting Agentic TinyLlama Workflow…\n")
+    print("\n Starting Agentic TinyLlama Chat Workflow…\n")
     result = crew.kickoff()
     print("\n Final Agentic AI Output:\n", result)
