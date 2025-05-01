@@ -43,7 +43,7 @@ class TinyLlamaChatLLM(LLM):
             torch_dtype="auto",
             return_full_text=False,
             do_sample=False,
-            max_new_tokens=150,
+            max_new_tokens=500,
         )
 
     def call(self, prompt: str, **kwargs) -> str:
@@ -56,7 +56,7 @@ class TinyLlamaChatLLM(LLM):
             "<|end|>\n\n"
             "<|assistant|>\n"
         )
-        out = self.generator(chat, max_new_tokens=kwargs.get("max_new_tokens",150))[0]["generated_text"]
+        out = self.generator(chat, max_new_tokens=kwargs.get("max_new_tokens",500))[0]["generated_text"]
         return out.strip()
 
 llm = TinyLlamaChatLLM()
