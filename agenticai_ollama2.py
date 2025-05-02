@@ -125,6 +125,6 @@ crew = Crew(
 )
 
 if __name__ == "__main__":
-    print("\n Starting Agentic Llama-2-7B-Chat 4-bit Workflow…\n")
+    print("\n Starting Agentic ollama llama2:7b-chat Workflow…\n")
     result = crew.kickoff()
     print("\n Final Agentic AI Output:\n", result)
